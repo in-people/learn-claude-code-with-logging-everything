@@ -2,7 +2,7 @@
 
 `s01 > [ s02 ] s03 > s04 > s05 > s06 | s07 > s08 > s09 > s10 > s11 > s12`
 
-> *"加一个工具, 只加一个 handler"* -- 循环不用动, 新工具注册进 dispatch map 就行。
+> *"加一个工具, 只加一个 handler"* -- 循环不用动, 新工具注册进 dispatch map （**调度图**）就行。
 
 ## 问题
 
@@ -77,12 +77,12 @@ for block in response.content:
 
 ## 相对 s01 的变更
 
-| 组件           | 之前 (s01)         | 之后 (s02)                     |
-|----------------|--------------------|--------------------------------|
-| Tools          | 1 (仅 bash)        | 4 (bash, read, write, edit)    |
-| Dispatch       | 硬编码 bash 调用   | `TOOL_HANDLERS` 字典           |
-| 路径安全       | 无                 | `safe_path()` 沙箱             |
-| Agent loop     | 不变               | 不变                           |
+| 组件       | 之前 (s01)       | 之后 (s02)                  |
+| ---------- | ---------------- | --------------------------- |
+| Tools      | 1 (仅 bash)      | 4 (bash, read, write, edit) |
+| Dispatch   | 硬编码 bash 调用 | `TOOL_HANDLERS` 字典      |
+| 路径安全   | 无               | `safe_path()` 沙箱        |
+| Agent loop | 不变             | 不变                        |
 
 ## 试一试
 
@@ -94,6 +94,10 @@ python agents/s02_tool_use.py
 试试这些 prompt (英文 prompt 对 LLM 效果更好, 也可以用中文):
 
 1. `Read the file requirements.txt`
+读取 requirements.txt 文件
 2. `Create a file called greet.py with a greet(name) function`
+创建一个名为 greet.py 的文件，其中包含一个 greet(name) 函数
 3. `Edit greet.py to add a docstring to the function`
+编辑 greet.py，为该函数添加文档字符串（docstring）
 4. `Read greet.py to verify the edit worked`
+读取 greet.py 以验证编辑是否生效

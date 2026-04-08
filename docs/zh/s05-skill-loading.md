@@ -50,9 +50,34 @@ class SkillLoader:
     def __init__(self, skills_dir: Path):
         self.skills = {}
         for f in sorted(skills_dir.rglob("SKILL.md")):
-            text = f.read_text()
+            # 1. 递归搜索所有 SKILL.md 文件
+            # - skills_dir.rglob("SKILL.md"): 递归查找目录下所有名为 "SKILL.md" 的文件
+            # - sorted(): 按文件路径排序，确保加载顺序一致
+            text = f.read_text()  # 2. 读取文件内容为字符串
+
+            # 3. 解析文件的前置元数据（Frontmatter）
+            # 格��示例：
+            # ---
+            # name: commit
+            # description: Git operations
+            # ---
+            # 技能内容...
+            # - meta: 解析出的元数据字典（name, description 等）
+            # - body: 文件的主体内容（技能说明）
             meta, body = self._parse_frontmatter(text)
+
+            # 4. 获取技能名称
+            # - 优先使用 meta 中的 "name" 字段
+            # - 如果没有，使用文件的父目录名作为默认名称
+            # 例如：skills/commit/SKILL.md → name = "commit"
             name = meta.get("name", f.parent.name)
+
+            # 5. 存储技能信息
+            # - self.skills: 字典，存储所有加载的技能
+            # - name: 技能名称（字典的键）
+            # - 值包含：
+            #   - meta: 技能的元数据
+            #   - body: 技能的详细内容
             self.skills[name] = {"meta": meta, "body": body}
 
     def get_descriptions(self) -> str:

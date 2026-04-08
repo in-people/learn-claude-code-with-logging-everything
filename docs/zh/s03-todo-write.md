@@ -59,7 +59,7 @@ TOOL_HANDLERS = {
 }
 ```
 
-3. nag reminder: 模型连续 3 轮以上不调用 `todo` 时注入提醒。
+3. nag reminder（**频繁催促提醒**）: 模型连续 3 轮以上不调用 `todo` 时注入提醒。
 
 ```python
 if rounds_since_todo >= 3 and messages:
@@ -75,12 +75,12 @@ if rounds_since_todo >= 3 and messages:
 
 ## 相对 s02 的变更
 
-| 组件           | 之前 (s02)       | 之后 (s03)                     |
-|----------------|------------------|--------------------------------|
-| Tools          | 4                | 5 (+todo)                      |
-| 规划           | 无               | 带状态的 TodoManager           |
-| Nag 注入       | 无               | 3 轮后注入 `<reminder>`        |
-| Agent loop     | 简单分发         | + rounds_since_todo 计数器     |
+| 组件       | 之前 (s02) | 之后 (s03)                 |
+| ---------- | ---------- | -------------------------- |
+| Tools      | 4          | 5 (+todo)                  |
+| 规划       | 无         | 带状态的 TodoManager       |
+| Nag 注入   | 无         | 3 轮后注入 `<reminder>`  |
+| Agent loop | 简单分发   | + rounds_since_todo 计数器 |
 
 ## 试一试
 
@@ -92,5 +92,8 @@ python agents/s03_todo_write.py
 试试这些 prompt (英文 prompt 对 LLM 效果更好, 也可以用中文):
 
 1. `Refactor the file hello.py: add type hints, docstrings, and a main guard`
-2. `Create a Python package with __init__.py, utils.py, and tests/test_utils.py`
+    重构 hello.py 文件：添加类型提示、文档字符串以及主程序入口保护（main guard）。
+2. `Create wff Python package with __init__.py, utils.py, and tests/test_utils.py`
+    创建名为 wff 的 Python 包，包含 __init__.py、utils.py 以及测试文件 tests/test_utils.py
 3. `Review all Python files and fix any style issues`
+    检查所有 Python 文件，并指出任何代码风格问题

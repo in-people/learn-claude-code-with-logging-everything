@@ -38,9 +38,13 @@ import os
 import re
 import subprocess
 from pathlib import Path
+import logging
 
+import yaml
 from anthropic import Anthropic
 from dotenv import load_dotenv
+
+from agent_logger import create_agent_logger, Events, LoggerConfig
 
 load_dotenv(override=True)
 
@@ -52,33 +56,43 @@ client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
 SKILLS_DIR = WORKDIR / "skills"
 
+# 设置基础日志（只针对自己的 logger）
+logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger("s05_agent")
+logger.setLevel(logging.INFO)
+
 
 # -- SkillLoader: scan skills/<name>/SKILL.md with YAML frontmatter --
 class SkillLoader:
-    def __init__(self, skills_dir: Path):
+    def __init__(self, skills_dir: Path, trace_logger=None):
         self.skills_dir = skills_dir
         self.skills = {}
+        self.trace_logger = trace_logger
         self._load_all()
 
+    # 扫描并加载技能目录下的所有SKILL.md文件
     def _load_all(self):
         if not self.skills_dir.exists():
+            logger.warning(f"Skills directory not found: {self.skills_dir}")
             return
-        for f in sorted(self.skills_dir.rglob("SKILL.md")):
+        for f in sorted(self.skills_dir.rglob("SKILL.md")):  # rglob递归查找所有名为SKILLL.md的文件
             text = f.read_text()
             meta, body = self._parse_frontmatter(text)
             name = meta.get("name", f.parent.name)
             self.skills[name] = {"meta": meta, "body": body, "path": str(f)}
+            logger.info(f"Loaded skill: {name} from {f}")
 
+    # 解析技能的元数据、内容
     def _parse_frontmatter(self, text: str) -> tuple:
         """Parse YAML frontmatter between --- delimiters."""
         match = re.match(r"^---\n(.*?)\n---\n(.*)", text, re.DOTALL)
         if not match:
             return {}, text
-        meta = {}
-        for line in match.group(1).strip().splitlines():
-            if ":" in line:
-                key, val = line.split(":", 1)
-                meta[key.strip()] = val.strip()
+        try:
+            # 把yaml文本解析为Python字典
+            meta = yaml.safe_load(match.group(1)) or {}
+        except yaml.YAMLError:
+            meta = {}
         return meta, match.group(2).strip()
 
     def get_descriptions(self) -> str:
@@ -99,19 +113,37 @@ class SkillLoader:
         """Layer 2: full skill body returned in tool_result."""
         skill = self.skills.get(name)
         if not skill:
-            return f"Error: Unknown skill '{name}'. Available: {', '.join(self.skills.keys())}"
+            error_msg = f"Error: Unknown skill '{name}'. Available: {', '.join(self.skills.keys())}"
+            logger.warning(error_msg)
+            # 记录技能加载失败
+            # if self.trace_logger:
+            #     self.trace_logger.log_event(Events.SKILL_LOAD_FAILED, {
+            #         "skill_name": name,
+            #         "error": error_msg,
+            #         "available_skills": list(self.skills.keys()),
+            #     })
+            return error_msg
+
+        # 记录技能加载成功
+        # if self.trace_logger:
+        #     self.trace_logger.log_event(Events.SKILL_LOADED, {
+        #         "skill_name": name,
+        #         "description": skill["meta"].get("description", ""),
+        #         "path": skill["path"],
+        #     })
+
+        logger.info(f"Loaded skill content: {name}")
         return f"<skill name=\"{name}\">\n{skill['body']}\n</skill>"
 
 
-SKILL_LOADER = SkillLoader(SKILLS_DIR)
-
 # Layer 1: skill metadata injected into system prompt
-SYSTEM = f"""You are a coding agent at {WORKDIR}.
+def get_system_prompt(skill_loader: SkillLoader) -> str:
+    """生成包含技能列表的系统提示"""
+    return f"""You are a coding agent at {WORKDIR}.
 Use load_skill to access specialized knowledge before tackling unfamiliar topics.
 
 Skills available:
-{SKILL_LOADER.get_descriptions()}"""
-
+{skill_loader.get_descriptions()}"""
 
 # -- Tool implementations --
 def safe_path(p: str) -> Path:
@@ -162,13 +194,16 @@ def run_edit(path: str, old_text: str, new_text: str) -> str:
         return f"Error: {e}"
 
 
-TOOL_HANDLERS = {
-    "bash":       lambda **kw: run_bash(kw["command"]),
-    "read_file":  lambda **kw: run_read(kw["path"], kw.get("limit")),
-    "write_file": lambda **kw: run_write(kw["path"], kw["content"]),
-    "edit_file":  lambda **kw: run_edit(kw["path"], kw["old_text"], kw["new_text"]),
-    "load_skill": lambda **kw: SKILL_LOADER.get_content(kw["name"]),
-}
+# 工具处理器将在运行时创建，因为需要访问 skill_loader
+def create_tool_handlers(skill_loader: SkillLoader) -> dict:
+    """创建工具处理器字典"""
+    return {
+        "bash":       lambda **kw: run_bash(kw["command"]),
+        "read_file":  lambda **kw: run_read(kw["path"], kw.get("limit")),
+        "write_file": lambda **kw: run_write(kw["path"], kw["content"]),
+        "edit_file":  lambda **kw: run_edit(kw["path"], kw["old_text"], kw["new_text"]),
+        "load_skill": lambda **kw: skill_loader.get_content(kw["name"]),
+    }
 
 TOOLS = [
     {"name": "bash", "description": "Run a shell command.",
@@ -184,42 +219,144 @@ TOOLS = [
 ]
 
 
-def agent_loop(messages: list):
+def agent_loop(messages: list, trace_logger=None, step_counter={"count": 0}, tool_handlers=None):
+    """主代理循环
+
+    Args:
+        messages: 消息历史
+        trace_logger: 轨迹日志记录器
+        step_counter: 步骤计数器
+        tool_handlers: 工具处理器字典
+    """
+    step_counter["count"] = 0
     while True:
+        step_counter["count"] += 1
+        current_step = step_counter["count"]
+
+        # 调用模型
         response = client.messages.create(
             model=MODEL, system=SYSTEM, messages=messages,
             tools=TOOLS, max_tokens=8000,
         )
+
+        # 记录模型输出
+        if trace_logger:
+            tool_calls = []
+            for block in response.content:
+                if hasattr(block, "type") and block.type == "tool_use":
+                    tool_calls.append({
+                        "id": block.id if hasattr(block, "id") else "",
+                        "name": block.name if hasattr(block, "name") else "",
+                        "input": block.input if hasattr(block, "input") else {},
+                    })
+
+            content_text = ""
+            for block in response.content:
+                if hasattr(block, "text"):
+                    content_text += block.text
+
+            trace_logger.log_event(Events.MODEL_OUTPUT, {
+                "content": content_text,
+                "usage": {
+                    "prompt_tokens": response.usage.input_tokens if hasattr(response, "usage") else 0,
+                    "completion_tokens": response.usage.output_tokens if hasattr(response, "usage") else 0,
+                    "total_tokens": (response.usage.input_tokens + response.usage.output_tokens) if hasattr(response, "usage") else 0,
+                },
+                "tool_calls": tool_calls,
+                "stop_reason": response.stop_reason,
+            }, step=current_step)
+
         messages.append({"role": "assistant", "content": response.content})
         if response.stop_reason != "tool_use":
             return
         results = []
         for block in response.content:
             if block.type == "tool_use":
-                handler = TOOL_HANDLERS.get(block.name)
+                # 记录工具调用
+                if trace_logger:
+                    trace_logger.log_event(Events.TOOL_CALL, {
+                        "tool": block.name,
+                        "args": block.input,
+                    }, step=current_step)
+
+                handler = tool_handlers.get(block.name) if tool_handlers else None
                 try:
                     output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
+
+                    # 记录工具结果
+                    if trace_logger:
+                        trace_logger.log_event(Events.TOOL_RESULT, {
+                            "tool": block.name,
+                            "result": str(output)[:50000],
+                        }, step=current_step)
+
                 except Exception as e:
-                    output = f"Error: {e}"
+                    error_msg = f"Error executing {block.name}: {str(e)}"
+                    logger.error(error_msg)
+
+                    # 记录错误
+                    if trace_logger:
+                        trace_logger.log_event(Events.ERROR, {
+                            "error": error_msg,
+                            "tool": block.name,
+                        }, step=current_step)
+
+                    output = error_msg
+
                 print(f"> {block.name}: {str(output)[:200]}")
                 results.append({"type": "tool_result", "tool_use_id": block.id, "content": str(output)})
         messages.append({"role": "user", "content": results})
 
 
 if __name__ == "__main__":
+    # 创建轨迹日志记录器
+    trace_logger = create_agent_logger(
+        trace_dir="logs/traces",
+        enabled=True,
+    )
+
+    # 创建技能加载器并传入 trace_logger
+    skill_loader = SkillLoader(SKILLS_DIR, trace_logger=trace_logger)
+
+    # 设置系统提示
+    global SYSTEM
+    SYSTEM = get_system_prompt(skill_loader)
+
+    print(f"SKILLS: {skill_loader.get_descriptions()}")
+
+    # 创建工具处理器
+    tool_handlers = create_tool_handlers(skill_loader)
+
+    step_counter = {"count": 0}
+    logger.info(f"开始会话: {trace_logger.session_id}")
+
     history = []
-    while True:
-        try:
-            query = input("\033[36ms05 >> \033[0m")
-        except (EOFError, KeyboardInterrupt):
-            break
-        if query.strip().lower() in ("q", "exit", ""):
-            break
-        history.append({"role": "user", "content": query})
-        agent_loop(history)
-        response_content = history[-1]["content"]
-        if isinstance(response_content, list):
-            for block in response_content:
-                if hasattr(block, "text"):
-                    print(block.text)
-        print()
+    try:
+        while True:
+            try:
+                query = input("\033[36ms05 >> \033[0m")
+            except (EOFError, KeyboardInterrupt):
+                break
+            if query.strip().lower() in ("q", "exit", ""):
+                break
+
+            # 记录用户输入
+            trace_logger.log_event(Events.USER_INPUT, {"text": query})
+
+            history.append({"role": "user", "content": query})
+            agent_loop(history, trace_logger=trace_logger, step_counter=step_counter, tool_handlers=tool_handlers)
+
+            # 强制刷新日志到磁盘
+            trace_logger.flush()
+
+            # 打印最后的回复
+            response_content = history[-1]["content"]
+            if isinstance(response_content, list):
+                for block in response_content:
+                    if hasattr(block, "text"):
+                        print(block.text)
+            print()
+    finally:
+        # 结束会话，保存日志（确保资源释放）
+        trace_logger.finalize()
+        logger.info("会话结束")

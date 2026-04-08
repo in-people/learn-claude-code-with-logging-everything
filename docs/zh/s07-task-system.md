@@ -104,13 +104,13 @@ TOOL_HANDLERS = {
 
 ## 相对 s06 的变更
 
-| 组件 | 之前 (s06) | 之后 (s07) |
-|---|---|---|
-| Tools | 5 | 8 (`task_create/update/list/get`) |
-| 规划模型 | 扁平清单 (仅内存) | 带依赖关系的任务图 (磁盘) |
-| 关系 | 无 | `blockedBy` + `blocks` 边 |
-| 状态追踪 | 做完没做完 | `pending` -> `in_progress` -> `completed` |
-| 持久化 | 压缩后丢失 | 压缩和重启后存活 |
+| 组件     | 之前 (s06)        | 之后 (s07)                                      |
+| -------- | ----------------- | ----------------------------------------------- |
+| Tools    | 5                 | 8 (`task_create/update/list/get`)             |
+| 规划模型 | 扁平清单 (仅内存) | 带依赖关系的任务图 (磁盘)                       |
+| 关系     | 无                | `blockedBy` + `blocks` 边                   |
+| 状态追踪 | 做完没做完        | `pending` -> `in_progress` -> `completed` |
+| 持久化   | 压缩后丢失        | 压缩和重启后存活                                |
 
 ## 试一试
 
@@ -125,3 +125,60 @@ python agents/s07_task_system.py
 2. `List all tasks and show the dependency graph`
 3. `Complete task 1 and then list tasks to see task 2 unblocked`
 4. `Create a task board for refactoring: parse -> transform -> emit -> test, where transform and emit can run in parallel after parse`
+
+1. 创建 3 个任务：“搭建项目”、“编写代码”、“编写测试”。让它们按顺序相互依赖。
+2. 列出所有任务并显示依赖关系图。
+3. 完成任务 1，然后列出任务以查看任务 2 是否已解除阻塞。
+4. 为重构建一个任务看板：解析 -> 转换 -> 输出 -> 测试，其中转换和输出可以在解析完成后并行运行。
+
+```bash
+> task_get: {
+  "id": 1,
+  "subject": "Setup project",
+  "description": "",
+  "status": "pending",
+  "blockedBy": [],
+  "blocks": [
+    2
+  ],
+  "owner": ""
+}
+
+> task_get: {
+  "id": 2,
+  "subject": "Write code",
+  "description": "",
+  "status": "pending",
+  "blockedBy": [
+    1
+  ],
+  "blocks": [
+    3
+  ],
+  "owner": ""
+}
+
+> task_get: {
+  "id": 3,
+  "subject": "Write tests",
+  "description": "",
+  "status": "pending",
+  "blockedBy": [
+    2
+  ],
+  "blocks": [],
+  "owner": ""
+}
+
+> task_list: [ ] #1: Setup project
+[ ] #2: Write code (blocked by: [1])
+[ ] #3: Write tests (blocked by: [2])
+## All Tasks
+
+| ID | Subject | Status | Blocked By | Blocks |
+|----|---------|--------|------------|--------|
+| 1 | Setup project | Pending | - | #2 |
+| 2 | Write code | Pending | #1 | #3 |
+| 3 | Write tests | Pending | #2 | - |
+
+```

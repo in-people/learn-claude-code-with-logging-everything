@@ -47,13 +47,34 @@ class TeammateManager:
         self.threads = {}
 ```
 
-2. `spawn()` 创建队友并在线程中启动 agent loop。
+```json
+{
+  "team_name": "default",
+  "members": [
+    {
+      "name": "alice",
+      "role": "coder",
+      "status": "idle"
+    },
+    {
+      "name": "bob",
+      "role": "tester",
+      "status": "idle"
+    }
+  ]
+}
+```
+
+2. `spawn()` 创建队友并在线程中启动 agent loop。  spawn中文翻译：生成、派生
 
 ```python
 def spawn(self, name: str, role: str, prompt: str) -> str:
     member = {"name": name, "role": role, "status": "working"}
     self.config["members"].append(member)
     self._save_config()
+    # 创建一个线程对象
+    # _teammate_loop 指定线程启动后要执行的目标函数
+    # args传递给目标函数的参数
     thread = threading.Thread(
         target=self._teammate_loop,
         args=(name, role, prompt), daemon=True)
@@ -76,6 +97,7 @@ class MessageBus:
     def read_inbox(self, name):
         path = self.dir / f"{name}.jsonl"
         if not path.exists(): return "[]"
+        # 读取全部内容。 按行分割成列表。 将每行JSON字符串解析为Python对象
         msgs = [json.loads(l) for l in path.read_text().strip().splitlines() if l]
         path.write_text("")  # drain
         return json.dumps(msgs, indent=2)
@@ -102,14 +124,14 @@ def _teammate_loop(self, name, role, prompt):
 
 ## 相对 s08 的变更
 
-| 组件           | 之前 (s08)       | 之后 (s09)                         |
-|----------------|------------------|------------------------------------|
-| Tools          | 6                | 9 (+spawn/send/read_inbox)         |
-| 智能体数量     | 单一             | 领导 + N 个队友                    |
-| 持久化         | 无               | config.json + JSONL 收件箱         |
-| 线程           | 后台命令         | 每线程完整 agent loop              |
-| 生命周期       | 一次性           | idle -> working -> idle            |
-| 通信           | 无               | message + broadcast                |
+| 组件       | 之前 (s08) | 之后 (s09)                 |
+| ---------- | ---------- | -------------------------- |
+| Tools      | 6          | 9 (+spawn/send/read_inbox) |
+| 智能体数量 | 单一       | 领导 + N 个队友            |
+| 持久化     | 无         | config.json + JSONL 收件箱 |
+| 线程       | 后台命令   | 每线程完整 agent loop      |
+| 生命周期   | 一次性     | idle -> working -> idle    |
+| 通信       | 无         | message + broadcast        |
 
 ## 试一试
 
@@ -121,7 +143,50 @@ python agents/s09_agent_teams.py
 试试这些 prompt (英文 prompt 对 LLM 效果更好, 也可以用中文):
 
 1. `Spawn alice (coder) and bob (tester). Have alice send bob a message.`
+生成角色并通讯：生成了 Alice（程序员）和 Bob（测试员），并让 Alice 给 Bob 发了消息
 2. `Broadcast "status update: phase 1 complete" to all teammates`
+全员广播：向所有队友广播“状态更新：第一阶段完成”
 3. `Check the lead inbox for any messages`
+检查收件箱：查看主管（Lead）的收件箱有没有新消息
 4. 输入 `/team` 查看团队名册和状态
 5. 输入 `/inbox` 手动检查领导的收件箱
+
+## Agent执行过程剖析
+
+* `Spawn alice (coder) and bob (tester). Have alice send bob a message.`
+
+让alice开发一个python程序，解决汉诺塔问题。
+
+
+让bob评审alice开发的用来解决汉诺塔问题的python代码
+
+这一步Agent没有搞出来，失智了。 在不停的循环。
+
+> bash: ./.team/inbox/lead.jsonl
+> bash: (no output)
+> bash: (no output)
+> read_inbox: []
+> list_teammates: Team: default
+> alice (Python Developer): idle
+> bob (tester): idle
+> send_message: Sent message to bob
+> bash: (no output)
+> read_inbox: []
+> bash: (no output)
+> read_inbox: []
+> bash: 总用量 76
+> -rw-rw-r-- 1 10346371@zte.intra 10346371@zte.intra  3318 3月   8 09:32 hanoi.py
+> drwxrwxr-x 7 10346371@zte.intra 10346371@zte.intra  4096 3月   7 23:05 web
+> -rw-rw-r-- 1 10346371@zte.intra 10346371
+> bash: (no output)
+> read_inbox: []
+> bash: (no output)
+>
+
+分析：Alice没有记忆。 每次执行完Alice邮箱会被清空，导致下一次执行的时候，缺少上下文。
+
+
+* `Broadcast "status update: phase 1 complete" to all teammates`
+* `Check the lead inbox for any messages`
+* 输入 `/team` 查看团队名册和状态
+* 输入 `/inbox` 手动检查领导的收件箱

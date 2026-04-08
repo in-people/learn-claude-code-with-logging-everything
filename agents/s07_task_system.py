@@ -22,12 +22,16 @@ Key insight: "State that survives compression -- because it's outside the conver
 """
 
 import json
+import logging
 import os
 import subprocess
 from pathlib import Path
 
 from anthropic import Anthropic
 from dotenv import load_dotenv
+
+from agent_logger import create_agent_logger, Events
+from agent_utils import log_model_output, truncate_messages_for_log
 
 load_dotenv(override=True)
 
@@ -39,6 +43,11 @@ client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
 TASKS_DIR = WORKDIR / ".tasks"
 
+# 设置基础日志（只针对自己的 logger）
+logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger("s07_agent")
+logger.setLevel(logging.INFO)
+
 SYSTEM = f"You are a coding agent at {WORKDIR}. Use task tools to plan and track work."
 
 
@@ -49,20 +58,27 @@ class TaskManager:
         self.dir.mkdir(exist_ok=True)
         self._next_id = self._max_id() + 1
 
+    # 读取任务列表的序号
     def _max_id(self) -> int:
         ids = [int(f.stem.split("_")[1]) for f in self.dir.glob("task_*.json")]
         return max(ids) if ids else 0
 
+    # 加载任务
     def _load(self, task_id: int) -> dict:
         path = self.dir / f"task_{task_id}.json"
         if not path.exists():
             raise ValueError(f"Task {task_id} not found")
-        return json.loads(path.read_text())
+        return json.loads(path.read_text(encoding='utf-8'))
 
     def _save(self, task: dict):
         path = self.dir / f"task_{task['id']}.json"
-        path.write_text(json.dumps(task, indent=2))
+        # json.dumps() 默认会将非 ASCII 字符转义为 Unicode 序列
+        # ensure_ascii=False 避免转义为Unicode 序列
+        path.write_text(json.dumps(task, indent=2, ensure_ascii=False), encoding='utf-8')
 
+    # 创建任务
+    # 生成带序号的任务对象
+    # 保存为独立的JSON文件 （格式：task_1.json, task_2.json...）
     def create(self, subject: str, description: str = "") -> str:
         task = {
             "id": self._next_id, "subject": subject, "description": description,
@@ -70,11 +86,12 @@ class TaskManager:
         }
         self._save(task)
         self._next_id += 1
-        return json.dumps(task, indent=2)
+        return json.dumps(task, indent=2, ensure_ascii=False)
 
     def get(self, task_id: int) -> str:
-        return json.dumps(self._load(task_id), indent=2)
+        return json.dumps(self._load(task_id), indent=2, ensure_ascii=False)
 
+    # 
     def update(self, task_id: int, status: str = None,
                add_blocked_by: list = None, add_blocks: list = None) -> str:
         task = self._load(task_id)
@@ -86,33 +103,33 @@ class TaskManager:
             if status == "completed":
                 self._clear_dependency(task_id)
         if add_blocked_by:
-            task["blockedBy"] = list(set(task["blockedBy"] + add_blocked_by))
+            task["blockedBy"] = list(set(task["blockedBy"] + add_blocked_by)) # 被谁阻塞
         if add_blocks:
-            task["blocks"] = list(set(task["blocks"] + add_blocks))
+            task["blocks"] = list(set(task["blocks"] + add_blocks)) # 阻塞谁
             # Bidirectional: also update the blocked tasks' blockedBy lists
             for blocked_id in add_blocks:
                 try:
                     blocked = self._load(blocked_id)
                     if task_id not in blocked["blockedBy"]:
-                        blocked["blockedBy"].append(task_id)
+                        blocked["blockedBy"].append(task_id) # 把task_id添加到被阻塞列表中
                         self._save(blocked)
                 except ValueError:
                     pass
         self._save(task)
-        return json.dumps(task, indent=2)
+        return json.dumps(task, indent=2, ensure_ascii=False)
 
     def _clear_dependency(self, completed_id: int):
         """Remove completed_id from all other tasks' blockedBy lists."""
         for f in self.dir.glob("task_*.json"):
-            task = json.loads(f.read_text())
+            task = json.loads(f.read_text(encoding='utf-8'))
             if completed_id in task.get("blockedBy", []):
-                task["blockedBy"].remove(completed_id)
+                task["blockedBy"].remove(completed_id)  # 从被阻塞列表中移除
                 self._save(task)
 
     def list_all(self) -> str:
         tasks = []
         for f in sorted(self.dir.glob("task_*.json")):
-            tasks.append(json.loads(f.read_text()))
+            tasks.append(json.loads(f.read_text(encoding='utf-8')))
         if not tasks:
             return "No tasks."
         lines = []
@@ -208,10 +225,26 @@ TOOLS = [
 
 def agent_loop(messages: list):
     while True:
+        step_counter["count"] += 1
+        current_step = step_counter["count"]
+
+        # 记录模型调用（包含截断的 messages）
+        if trace_logger:
+            trace_logger.log_event(Events.MODEL_CALL, {
+                "system": SYSTEM,
+                "messages": truncate_messages_for_log(messages),
+                "tools": [{"name": t.get("name"), "description": t.get("description")} for t in TOOLS],
+            }, step=current_step)
+
+        # 调用模型
         response = client.messages.create(
             model=MODEL, system=SYSTEM, messages=messages,
             tools=TOOLS, max_tokens=8000,
         )
+
+        # 记录模型输出
+        log_model_output(trace_logger, response, current_step)
+
         messages.append({"role": "assistant", "content": response.content})
         if response.stop_reason != "tool_use":
             return
@@ -219,29 +252,78 @@ def agent_loop(messages: list):
         for block in response.content:
             if block.type == "tool_use":
                 handler = TOOL_HANDLERS.get(block.name)
+
+                # 记录工具调用
+                if trace_logger:
+                    trace_logger.log_event(Events.TOOL_CALL, {
+                        "tool": block.name,
+                        "args": block.input,
+                    }, step=current_step)
+
                 try:
                     output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
+
+                    # 记录工具结果
+                    if trace_logger:
+                        trace_logger.log_event(Events.TOOL_RESULT, {
+                            "tool": block.name,
+                            "result": str(output)[:50000],
+                        }, step=current_step)
+
                 except Exception as e:
-                    output = f"Error: {e}"
-                print(f"> {block.name}: {str(output)[:200]}")
+                    error_msg = f"Error executing {block.name}: {str(e)}"
+                    logger.error(error_msg)
+
+                    # 记录错误
+                    if trace_logger:
+                        trace_logger.log_event(Events.ERROR, {
+                            "error": error_msg,
+                            "tool": block.name,
+                        }, step=current_step)
+
+                    output = error_msg
+
+                # print(f"> {block.name}: {str(output)[:200]}")
                 results.append({"type": "tool_result", "tool_use_id": block.id, "content": str(output)})
         messages.append({"role": "user", "content": results})
 
 
 if __name__ == "__main__":
+    trace_logger = create_agent_logger(
+        trace_dir="logs/traces",
+        enabled=True,
+    )
+    step_counter = {"count": 0}
+    logger.info(f"开始会话: {trace_logger.session_id}")
+
+    # 初始化任务管理器和工具处理器
+    task_manager = TaskManager(TASKS_DIR)
+
     history = []
-    while True:
-        try:
-            query = input("\033[36ms07 >> \033[0m")
-        except (EOFError, KeyboardInterrupt):
-            break
-        if query.strip().lower() in ("q", "exit", ""):
-            break
-        history.append({"role": "user", "content": query})
-        agent_loop(history)
-        response_content = history[-1]["content"]
-        if isinstance(response_content, list):
-            for block in response_content:
-                if hasattr(block, "text"):
-                    print(block.text)
-        print()
+    try:
+        while True:
+            try:
+                query = input("\033[36ms07 >> \033[0m")
+            except (EOFError, KeyboardInterrupt):
+                break
+            if query.strip().lower() in ("q", "exit", ""):
+                break
+            trace_logger.log_event(Events.USER_INPUT, {"text": query})
+
+            history.append({"role": "user", "content": query})
+            agent_loop(history)
+
+            # 强制刷新日志到磁盘
+            trace_logger.flush()
+
+            response_content = history[-1]["content"]
+            if isinstance(response_content, list):
+                for block in response_content:
+                    if hasattr(block, "text"):
+                        print(block.text)
+            print()
+    finally:
+        # 结束会话，保存日志（确保资源释放）
+        trace_logger.finalize()
+        logger.info("会话结束")
+

@@ -211,7 +211,7 @@ class TeammateManager:
                         "content": str(output),
                     })
                     if block.name == "shutdown_response" and block.input.get("approve"):
-                        should_exit = True
+                        should_exit = True # 关机
             messages.append({"role": "user", "content": results})
         member = self._find_member(name)
         if member:
@@ -232,13 +232,13 @@ class TeammateManager:
             return BUS.send(sender, args["to"], args["content"], args.get("msg_type", "message"))
         if tool_name == "read_inbox":
             return json.dumps(BUS.read_inbox(sender), indent=2)
-        if tool_name == "shutdown_response":
+        if tool_name == "shutdown_response": # 关机反馈
             req_id = args["request_id"]
             approve = args["approve"]
             with _tracker_lock:
                 if req_id in shutdown_requests:
                     shutdown_requests[req_id]["status"] = "approved" if approve else "rejected"
-            BUS.send(
+            BUS.send(  # 发送关机反馈
                 sender, "lead", args.get("reason", ""),
                 "shutdown_response", {"request_id": req_id, "approve": approve},
             )
@@ -247,8 +247,8 @@ class TeammateManager:
             plan_text = args.get("plan", "")
             req_id = str(uuid.uuid4())[:8]
             with _tracker_lock:
-                plan_requests[req_id] = {"from": sender, "plan": plan_text, "status": "pending"}
-            BUS.send(
+                plan_requests[req_id] = {"from": sender, "plan": plan_text, "status": "pending"} # 标记为待审批状态
+            BUS.send( # 通知负责人
                 sender, "lead", plan_text, "plan_approval_response",
                 {"request_id": req_id, "plan": plan_text},
             )
@@ -352,7 +352,7 @@ def handle_shutdown_request(teammate: str) -> str:
     with _tracker_lock:
         shutdown_requests[req_id] = {"target": teammate, "status": "pending"}
     BUS.send(
-        "lead", teammate, "Please shut down gracefully.",
+        "lead", teammate, "Please shut down gracefully.", # 让teammate关机
         "shutdown_request", {"request_id": req_id},
     )
     return f"Shutdown request {req_id} sent to '{teammate}' (status: pending)"
@@ -364,8 +364,8 @@ def handle_plan_review(request_id: str, approve: bool, feedback: str = "") -> st
     if not req:
         return f"Error: Unknown plan request_id '{request_id}'"
     with _tracker_lock:
-        req["status"] = "approved" if approve else "rejected"
-    BUS.send(
+        req["status"] = "approved" if approve else "rejected"  # 状态更新为approved
+    BUS.send(  # 发送消息给发起者
         "lead", req["from"], feedback, "plan_approval_response",
         {"request_id": request_id, "approve": approve, "feedback": feedback},
     )
@@ -378,6 +378,10 @@ def _check_shutdown_status(request_id: str) -> str:
 
 
 # -- Lead tool dispatch (12 tools) --
+# 增加了3个工具
+# shutdown_request 关机请求
+# shutdown_response 关机响应
+# plan_approval 计划审批
 TOOL_HANDLERS = {
     "bash":              lambda **kw: _run_bash(kw["command"]),
     "read_file":         lambda **kw: _run_read(kw["path"], kw.get("limit")),

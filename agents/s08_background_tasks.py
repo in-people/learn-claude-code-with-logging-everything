@@ -24,6 +24,7 @@ before each LLM call to deliver results.
 Key insight: "Fire and forget -- the agent doesn't block while the command runs."
 """
 
+import logging
 import os
 import subprocess
 import threading
@@ -32,6 +33,9 @@ from pathlib import Path
 
 from anthropic import Anthropic
 from dotenv import load_dotenv
+
+from agent_logger import create_agent_logger, Events
+from agent_utils import log_model_output, truncate_messages_for_log
 
 load_dotenv(override=True)
 
@@ -42,10 +46,14 @@ WORKDIR = Path.cwd()
 client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
 
+logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger("s08_agent")
+logger.setLevel(logging.INFO)
+
 SYSTEM = f"You are a coding agent at {WORKDIR}. Use background_run for long-running commands."
 
-
 # -- BackgroundManager: threaded execution + notification queue --
+# 多线程执行 + 通知队列
 class BackgroundManager:
     def __init__(self):
         self.tasks = {}  # task_id -> {status, result, command}
@@ -131,7 +139,7 @@ def run_bash(command: str) -> str:
 
 def run_read(path: str, limit: int = None) -> str:
     try:
-        lines = safe_path(path).read_text().splitlines()
+        lines = safe_path(path).read_text(encoding='utf-8').splitlines()
         if limit and limit < len(lines):
             lines = lines[:limit] + [f"... ({len(lines) - limit} more)"]
         return "\n".join(lines)[:50000]
@@ -142,7 +150,7 @@ def run_write(path: str, content: str) -> str:
     try:
         fp = safe_path(path)
         fp.parent.mkdir(parents=True, exist_ok=True)
-        fp.write_text(content)
+        fp.write_text(content, encoding='utf-8')
         return f"Wrote {len(content)} bytes"
     except Exception as e:
         return f"Error: {e}"
@@ -150,14 +158,13 @@ def run_write(path: str, content: str) -> str:
 def run_edit(path: str, old_text: str, new_text: str) -> str:
     try:
         fp = safe_path(path)
-        c = fp.read_text()
+        c = fp.read_text(encoding='utf-8')
         if old_text not in c:
             return f"Error: Text not found in {path}"
-        fp.write_text(c.replace(old_text, new_text, 1))
+        fp.write_text(c.replace(old_text, new_text, 1), encoding='utf-8')
         return f"Edited {path}"
     except Exception as e:
         return f"Error: {e}"
-
 
 TOOL_HANDLERS = {
     "bash":             lambda **kw: run_bash(kw["command"]),
@@ -183,9 +190,18 @@ TOOLS = [
      "input_schema": {"type": "object", "properties": {"task_id": {"type": "string"}}}},
 ]
 
-
-def agent_loop(messages: list):
+def agent_loop(messages: list, step_counter: dict = None, trace_logger = None):
     while True:
+        step_counter["count"] += 1
+        current_step = step_counter["count"]
+
+        if trace_logger:
+            trace_logger.log_event(Events.MODEL_CALL, {
+                "system": SYSTEM,
+                "messages": truncate_messages_for_log(messages),
+                "tools": [{"name": t.get("name"), "description": t.get("description")} for t in TOOLS],
+            }, step=current_step)
+
         # Drain background notifications and inject as system message before LLM call
         notifs = BG.drain_notifications()
         if notifs and messages:
@@ -193,11 +209,14 @@ def agent_loop(messages: list):
                 f"[bg:{n['task_id']}] {n['status']}: {n['result']}" for n in notifs
             )
             messages.append({"role": "user", "content": f"<background-results>\n{notif_text}\n</background-results>"})
-            messages.append({"role": "assistant", "content": "Noted background results."})
+            messages.append({"role": "assistant", "content": "Noted background results."}) # 提醒大模型注意后台任务
         response = client.messages.create(
             model=MODEL, system=SYSTEM, messages=messages,
             tools=TOOLS, max_tokens=8000,
         )
+
+        log_model_output(trace_logger, response, current_step)
+
         messages.append({"role": "assistant", "content": response.content})
         if response.stop_reason != "tool_use":
             return
@@ -205,29 +224,69 @@ def agent_loop(messages: list):
         for block in response.content:
             if block.type == "tool_use":
                 handler = TOOL_HANDLERS.get(block.name)
+
+                if trace_logger:
+                    trace_logger.log_event(Events.TOOL_CALL, {
+                        "tool": block.name,
+                        "args": block.input,
+                    }, step=current_step)
+
                 try:
                     output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
+
+                    if trace_logger:
+                        trace_logger.log_event(Events.TOOL_RESULT, {
+                            "tool": block.name,
+                            "result": str(output)[:50000],
+                        }, step=current_step)
+
                 except Exception as e:
-                    output = f"Error: {e}"
-                print(f"> {block.name}: {str(output)[:200]}")
+                    error_msg = f"Error executing {block.name}: {str(e)}"
+                    logger.error(error_msg)
+
+                    if trace_logger:
+                        trace_logger.log_event(Events.ERROR, {
+                            "error": error_msg,
+                            "tool": block.name,
+                        }, step=current_step)
+
+                    output = error_msg
+
+                # print(f"> {block.name}: {str(output)[:200]}")
                 results.append({"type": "tool_result", "tool_use_id": block.id, "content": str(output)})
         messages.append({"role": "user", "content": results})
 
 
 if __name__ == "__main__":
+    trace_logger = create_agent_logger(
+        trace_dir="logs/traces",
+        enabled=True,
+    )
+    step_counter = {"count": 0}
+    logger.info(f"开始会话: {trace_logger.session_id}")
+
     history = []
-    while True:
-        try:
-            query = input("\033[36ms08 >> \033[0m")
-        except (EOFError, KeyboardInterrupt):
-            break
-        if query.strip().lower() in ("q", "exit", ""):
-            break
-        history.append({"role": "user", "content": query})
-        agent_loop(history)
-        response_content = history[-1]["content"]
-        if isinstance(response_content, list):
-            for block in response_content:
-                if hasattr(block, "text"):
-                    print(block.text)
-        print()
+    try:
+        while True:
+            try:
+                query = input("\033[36ms08 >> \033[0m")
+            except (EOFError, KeyboardInterrupt):
+                break
+            if query.strip().lower() in ("q", "exit", ""):
+                break
+            trace_logger.log_event(Events.USER_INPUT, {"text": query})
+
+            history.append({"role": "user", "content": query})
+            agent_loop(history, step_counter, trace_logger)
+
+            trace_logger.flush()
+
+            response_content = history[-1]["content"]
+            if isinstance(response_content, list):
+                for block in response_content:
+                    if hasattr(block, "text"):
+                        print(block.text)
+            print()
+    finally:
+        trace_logger.finalize()
+        logger.info("会话结束")

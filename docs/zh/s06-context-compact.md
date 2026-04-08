@@ -42,7 +42,23 @@ continue    [Layer 2: auto_compact]
 
 ## 工作原理
 
-1. **第一层 -- micro_compact**: 每次 LLM 调用前, 将旧的 tool result 替换为占位符。
+1. **第一层 -- micro_compact**: 每次 LLM 调用前, 将旧的 tool result 替换为**占位符**。
+
+   如果内容被压缩，旧的content内容将丢失。被替换为[Previous: used {tool_name}]
+
+压缩前的messages[]  
+   ![Micro Compact 示意图](../../images/6-1.PNG)
+
+
+
+压缩工具执行结果  
+   ![压缩动作](../../images/6-2压缩动作.PNG)
+
+
+
+压缩后的messages[]  
+   ![压缩工具执行结果](../../images/6-3压缩工具执行结果.PNG)
+
 
 ```python
 def micro_compact(messages: list) -> list:
@@ -60,16 +76,17 @@ def micro_compact(messages: list) -> list:
     return messages
 ```
 
+
 2. **第二层 -- auto_compact**: token 超过阈值时, 保存完整对话到磁盘, 让 LLM 做摘要。
 
 ```python
-def auto_compact(messages: list) -> list:
+ def auto_compact(messages: list) -> list:
     # Save transcript for recovery
     transcript_path = TRANSCRIPT_DIR / f"transcript_{int(time.time())}.jsonl"
     with open(transcript_path, "w") as f:
-        for msg in messages:
+        for msg in messages:  # 保存会话内容到磁盘
             f.write(json.dumps(msg, default=str) + "\n")
-    # LLM summarizes
+    # LLM summarizes 大模型总结会话内容
     response = client.messages.create(
         model=MODEL,
         messages=[{"role": "user", "content":
@@ -84,7 +101,6 @@ def auto_compact(messages: list) -> list:
 ```
 
 3. **第三层 -- manual compact**: `compact` 工具按需触发同样的摘要机制。
-
 4. 循环整合三层:
 
 ```python
@@ -103,13 +119,13 @@ def agent_loop(messages: list):
 
 ## 相对 s05 的变更
 
-| 组件           | 之前 (s05)       | 之后 (s06)                     |
-|----------------|------------------|--------------------------------|
-| Tools          | 5                | 5 (基础 + compact)             |
-| 上下文管理     | 无               | 三层压缩                       |
-| Micro-compact  | 无               | 旧结果 -> 占位符               |
-| Auto-compact   | 无               | token 阈值触发                 |
-| Transcripts    | 无               | 保存到 .transcripts/           |
+| 组件          | 之前 (s05) | 之后 (s06)           |
+| ------------- | ---------- | -------------------- |
+| Tools         | 5          | 5 (基础 + compact)   |
+| 上下文管理    | 无         | 三层压缩             |
+| Micro-compact | 无         | 旧结果 -> 占位符     |
+| Auto-compact  | 无         | token 阈值触发       |
+| Transcripts   | 无         | 保存到 .transcripts/ |
 
 ## 试一试
 
@@ -119,7 +135,7 @@ python agents/s06_context_compact.py
 ```
 
 试试这些 prompt (英文 prompt 对 LLM 效果更好, 也可以用中文):
-
-1. `Read every Python file in the agents/ directory one by one` (观察 micro-compact 替换旧结果)
-2. `Keep reading files until compression triggers automatically`
-3. `Use the compact tool to manually compress the conversation`
+1. 逐个读取 agents/ 目录下的每个 Python 文件（观察 micro-compact 是否替换了旧结果）
+   测试发现一个问题，怎么确保它会遍历所有的Python文件？会不会存在遗漏？
+2. 持续读取文件，直到自动触发压缩
+3. 使用 compact 工具手动压缩对话

@@ -1,4 +1,37 @@
-[English](./README.md) | [中文](./README-zh.md) | [日本語](./README-ja.md)  
+[English](./README.md) | [中文](./README-zh.md) | [日本語](./README-ja.md)
+
+---
+
+# 可视化日志追踪
+
+**新功能 | 调试利器**
+
+每个 agent 会话自动生成**浏览器可读的 HTML 追踪报告**，实时记录：
+
+- **完整执行链路** - 每步的模型调用、工具使用、token 消耗
+- **子 agent 调用栈** - 嵌套 subagent 的完整上下文和返回值
+- **上下文压缩追踪** - Compact 操作的触发时机和压缩效果
+- **会话统计面板** - 总步骤、工具调用次数、总 token 使用量
+
+参考日志： all_logs
+日志保存至 `logs/traces/trace-{session-id}.html`，浏览器打开即可查看完整运行过程。
+
+压缩前的messages[]  
+   ![Micro Compact 示意图](./images/6-1.PNG)
+
+
+
+压缩工具执行结果  
+   ![压缩动作](./images/6-2压缩动作.PNG)
+
+
+
+压缩后的messages[]  
+   ![压缩工具执行结果](./images/6-3压缩工具执行结果.PNG)
+
+---
+
+
 # Learn Claude Code -- A nano Claude Code-like agent, built from 0 to 1
 <img width="260" src="https://github.com/user-attachments/assets/fe8b852b-97da-4061-a467-9694906b5edf" /><br>
 
