@@ -13,7 +13,7 @@
 - **上下文压缩追踪** - Compact 操作的触发时机和压缩效果
 - **会话统计面板** - 总步骤、工具调用次数、总 token 使用量
 
-参考日志： [all_logs/01_agent_loop/Agent loop log.pdf](./all_logs/01_agent_loop/Agent%20loop%20log.pdf)
+参考日志： [all_logs/01_agent_loop/Agent loop log.pdf](./all_logs/01_agent_loop/Agent%20loop%20log.pdf)  
 日志保存至 `logs/traces/trace-{session-id}.html`，浏览器打开即可查看完整运行过程。
 
 压缩前的messages[]  
