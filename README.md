@@ -2,6 +2,27 @@
 
 ---
 
+# 说明
+
+本教程基于 [shareAI-lab/learn-claude-code](https://github.com/shareAI-lab/learn-claude-code) 演变而来。  
+https://github.com/YYHDBL/MyCodeAgent 项目Trace 追踪给了我很大启发。
+
+**核心特色：Agent 运行可视化日志追踪**
+
+本教程通过完整的日志追踪系统，帮助读者深入理解 Agent 的每个执行步骤：
+
+- 📤 **发送消息**：发送给大模型的消息列表内容。
+- 📥 **接收响应**：大模型的响应内容和结构。
+- 🔧 **工具调用**：调用了哪些工具？工具执行结果如何？
+- 📚 **技能使用**：使用了哪些技能？何时加载的？
+- 🤖 **子 Agent 协作**：subAgent 如何运行？返回了什么结果？
+- 🗜️ **上下文压缩**：何时进行消息压缩？压缩了哪些数据？
+- 📨 **团队协作**：不同子 Agent 之间传递了哪些数据？
+
+所有这些信息都通过HTML 追踪报告清晰呈现，让 Agent 的"黑盒"变得透明可观测！！！
+
+快速预览HTML追踪报告： [all_logs/01_agent_loop/Agent loop log.pdf](./all_logs/01_agent_loop/Agent%20loop%20log.pdf)  
+
 # 可视化日志追踪
 
 **新功能 | 调试利器**
@@ -15,20 +36,6 @@
 
 参考日志： [all_logs/01_agent_loop/Agent loop log.pdf](./all_logs/01_agent_loop/Agent%20loop%20log.pdf)  
 日志保存至 `logs/traces/trace-{session-id}.html`，浏览器打开即可查看完整运行过程。
-
-压缩前的messages[]  
-   ![Micro Compact 示意图](./images/6-1.PNG)
-
-
-
-压缩工具执行结果  
-   ![压缩动作](./images/6-2压缩动作.PNG)
-
-
-
-压缩后的messages[]  
-   ![压缩工具执行结果](./images/6-3压缩工具执行结果.PNG)
-
 ---
 
 

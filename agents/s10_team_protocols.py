@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
+# Harness: protocols -- structured handshakes between models.
 """
-s10_team_protocols.py - Team Protocols
+s16_team_protocols.py - Team Protocols
 
 Shutdown protocol and plan approval protocol, both using the same
-request_id correlation pattern. Builds on s09's team messaging.
+request_id correlation pattern. Builds on s15's mailbox-based team messaging.
 
     Shutdown FSM: pending -> approved | rejected
 
@@ -36,14 +37,28 @@ request_id correlation pattern. Builds on s09's team messaging.
                                      +---------------------+
                                              |
     +---------------------+          +-------v-------------+
-    | plan_approval_resp   | <------- | plan_approval       |
+    | plan_approval_response| <------ | plan_approval       |
     | {approve: true}      |          | review: {req_id,    |
     +---------------------+          |   approve: true}     |
                                      +---------------------+
 
-    Trackers: {request_id: {"target|from": name, "status": "pending|..."}}
+    Request store: .team/requests/{request_id}.json
 
-Key insight: "Same request_id correlation pattern, two domains."
+Key idea: one request/response shape can support multiple kinds of team workflow.
+Protocol requests are structured workflow objects, not normal free-form chat.
+
+Read this file in this order:
+1. MessageBus: how protocol envelopes still travel through the same inbox surface.
+2. Request files under .team/requests: how a request keeps durable status after the message is sent.
+3. Protocol handlers: how shutdown and plan approval reuse the same correlation pattern.
+
+Most common confusion:
+- a protocol request is not a normal teammate chat message
+- a request record is not a task record
+
+Teaching boundary:
+this file teaches durable handshakes first.
+Autonomous claiming, task selection, and worktree assignment stay in later chapters.
 """
 
 import json
@@ -66,6 +81,7 @@ client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
 TEAM_DIR = WORKDIR / ".team"
 INBOX_DIR = TEAM_DIR / "inbox"
+REQUESTS_DIR = TEAM_DIR / "requests"
 
 SYSTEM = f"You are a team lead at {WORKDIR}. Manage teammates with shutdown and plan approval protocols."
 
@@ -74,14 +90,9 @@ VALID_MSG_TYPES = {
     "broadcast",
     "shutdown_request",
     "shutdown_response",
+    "plan_approval",
     "plan_approval_response",
 }
-
-# -- Request trackers: correlate by request_id --
-shutdown_requests = {}
-plan_requests = {}
-_tracker_lock = threading.Lock()
-
 
 # -- MessageBus: JSONL inbox per teammate --
 class MessageBus:
@@ -111,10 +122,10 @@ class MessageBus:
         if not inbox_path.exists():
             return []
         messages = []
-        for line in inbox_path.read_text().strip().splitlines():
+        for line in inbox_path.read_text(encoding='utf-8').strip().splitlines():
             if line:
                 messages.append(json.loads(line))
-        inbox_path.write_text("")
+        inbox_path.write_text("", encoding='utf-8')
         return messages
 
     def broadcast(self, sender: str, content: str, teammates: list) -> str:
@@ -129,6 +140,48 @@ class MessageBus:
 BUS = MessageBus(INBOX_DIR)
 
 
+class RequestStore:
+    """
+    Durable request records for protocol workflows.
+
+    Protocol state should survive long enough to inspect, resume, or reconcile.
+    This store keeps one JSON file per request_id under .team/requests/.
+    """
+
+    def __init__(self, base_dir: Path):
+        self.dir = base_dir
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
+
+    def _path(self, request_id: str) -> Path:
+        return self.dir / f"{request_id}.json"
+
+    def create(self, record: dict) -> dict:
+        request_id = record["request_id"]
+        with self._lock:
+            self._path(request_id).write_text(json.dumps(record, indent=2), encoding='utf-8')
+        return record
+
+    def get(self, request_id: str) -> dict | None:
+        path = self._path(request_id)
+        if not path.exists():
+            return None
+        return json.loads(path.read_text(encoding='utf-8'))
+
+    def update(self, request_id: str, **changes) -> dict | None:
+        with self._lock:
+            record = self.get(request_id)
+            if not record:
+                return None
+            record.update(changes)
+            record["updated_at"] = time.time()
+            self._path(request_id).write_text(json.dumps(record, indent=2), encoding='utf-8')
+        return record
+
+
+REQUEST_STORE = RequestStore(REQUESTS_DIR)
+
+
 # -- TeammateManager with shutdown + plan approval --
 class TeammateManager:
     def __init__(self, team_dir: Path):
@@ -140,11 +193,11 @@ class TeammateManager:
 
     def _load_config(self) -> dict:
         if self.config_path.exists():
-            return json.loads(self.config_path.read_text())
+            return json.loads(self.config_path.read_text(encoding='utf-8'))
         return {"team_name": "default", "members": []}
 
     def _save_config(self):
-        self.config_path.write_text(json.dumps(self.config, indent=2))
+        self.config_path.write_text(json.dumps(self.config, indent=2), encoding='utf-8')
 
     def _find_member(self, name: str) -> dict:
         for m in self.config["members"]:
@@ -211,7 +264,7 @@ class TeammateManager:
                         "content": str(output),
                     })
                     if block.name == "shutdown_response" and block.input.get("approve"):
-                        should_exit = True # 关机
+                        should_exit = True
             messages.append({"role": "user", "content": results})
         member = self._find_member(name)
         if member:
@@ -232,13 +285,19 @@ class TeammateManager:
             return BUS.send(sender, args["to"], args["content"], args.get("msg_type", "message"))
         if tool_name == "read_inbox":
             return json.dumps(BUS.read_inbox(sender), indent=2)
-        if tool_name == "shutdown_response": # 关机反馈
+        if tool_name == "shutdown_response":
             req_id = args["request_id"]
             approve = args["approve"]
-            with _tracker_lock:
-                if req_id in shutdown_requests:
-                    shutdown_requests[req_id]["status"] = "approved" if approve else "rejected"
-            BUS.send(  # 发送关机反馈
+            updated = REQUEST_STORE.update(
+                req_id,
+                status="approved" if approve else "rejected",
+                resolved_by=sender,
+                resolved_at=time.time(),
+                response={"approve": approve, "reason": args.get("reason", "")},
+            )
+            if not updated:
+                return f"Error: Unknown shutdown request {req_id}"
+            BUS.send(
                 sender, "lead", args.get("reason", ""),
                 "shutdown_response", {"request_id": req_id, "approve": approve},
             )
@@ -246,10 +305,18 @@ class TeammateManager:
         if tool_name == "plan_approval":
             plan_text = args.get("plan", "")
             req_id = str(uuid.uuid4())[:8]
-            with _tracker_lock:
-                plan_requests[req_id] = {"from": sender, "plan": plan_text, "status": "pending"} # 标记为待审批状态
-            BUS.send( # 通知负责人
-                sender, "lead", plan_text, "plan_approval_response",
+            REQUEST_STORE.create({
+                "request_id": req_id,
+                "kind": "plan_approval",
+                "from": sender,
+                "to": "lead",
+                "status": "pending",
+                "plan": plan_text,
+                "created_at": time.time(),
+                "updated_at": time.time(),
+            })
+            BUS.send(
+                sender, "lead", plan_text, "plan_approval",
                 {"request_id": req_id, "plan": plan_text},
             )
             return f"Plan submitted (request_id={req_id}). Waiting for lead approval."
@@ -316,7 +383,7 @@ def _run_bash(command: str) -> str:
 
 def _run_read(path: str, limit: int = None) -> str:
     try:
-        lines = _safe_path(path).read_text().splitlines()
+        lines = _safe_path(path).read_text(encoding='utf-8').splitlines()
         if limit and limit < len(lines):
             lines = lines[:limit] + [f"... ({len(lines) - limit} more)"]
         return "\n".join(lines)[:50000]
@@ -328,7 +395,7 @@ def _run_write(path: str, content: str) -> str:
     try:
         fp = _safe_path(path)
         fp.parent.mkdir(parents=True, exist_ok=True)
-        fp.write_text(content)
+        fp.write_text(content, encoding='utf-8')
         return f"Wrote {len(content)} bytes"
     except Exception as e:
         return f"Error: {e}"
@@ -337,10 +404,10 @@ def _run_write(path: str, content: str) -> str:
 def _run_edit(path: str, old_text: str, new_text: str) -> str:
     try:
         fp = _safe_path(path)
-        c = fp.read_text()
+        c = fp.read_text(encoding='utf-8')
         if old_text not in c:
             return f"Error: Text not found in {path}"
-        fp.write_text(c.replace(old_text, new_text, 1))
+        fp.write_text(c.replace(old_text, new_text, 1), encoding='utf-8')
         return f"Edited {path}"
     except Exception as e:
         return f"Error: {e}"
@@ -349,39 +416,45 @@ def _run_edit(path: str, old_text: str, new_text: str) -> str:
 # -- Lead-specific protocol handlers --
 def handle_shutdown_request(teammate: str) -> str:
     req_id = str(uuid.uuid4())[:8]
-    with _tracker_lock:
-        shutdown_requests[req_id] = {"target": teammate, "status": "pending"}
+    REQUEST_STORE.create({
+        "request_id": req_id,
+        "kind": "shutdown",
+        "from": "lead",
+        "to": teammate,
+        "status": "pending",
+        "created_at": time.time(),
+        "updated_at": time.time(),
+    })
     BUS.send(
-        "lead", teammate, "Please shut down gracefully.", # 让teammate关机
+        "lead", teammate, "Please shut down gracefully.",
         "shutdown_request", {"request_id": req_id},
     )
     return f"Shutdown request {req_id} sent to '{teammate}' (status: pending)"
 
 
 def handle_plan_review(request_id: str, approve: bool, feedback: str = "") -> str:
-    with _tracker_lock:
-        req = plan_requests.get(request_id)
+    req = REQUEST_STORE.get(request_id)
     if not req:
         return f"Error: Unknown plan request_id '{request_id}'"
-    with _tracker_lock:
-        req["status"] = "approved" if approve else "rejected"  # 状态更新为approved
-    BUS.send(  # 发送消息给发起者
+    REQUEST_STORE.update(
+        request_id,
+        status="approved" if approve else "rejected",
+        reviewed_by="lead",
+        resolved_at=time.time(),
+        feedback=feedback,
+    )
+    BUS.send(
         "lead", req["from"], feedback, "plan_approval_response",
         {"request_id": request_id, "approve": approve, "feedback": feedback},
     )
-    return f"Plan {req['status']} for '{req['from']}'"
+    return f"Plan {'approved' if approve else 'rejected'} for '{req['from']}'"
 
 
 def _check_shutdown_status(request_id: str) -> str:
-    with _tracker_lock:
-        return json.dumps(shutdown_requests.get(request_id, {"error": "not found"}))
+    return json.dumps(REQUEST_STORE.get(request_id) or {"error": "not found"})
 
 
 # -- Lead tool dispatch (12 tools) --
-# 增加了3个工具
-# shutdown_request 关机请求
-# shutdown_response 关机响应
-# plan_approval 计划审批
 TOOL_HANDLERS = {
     "bash":              lambda **kw: _run_bash(kw["command"]),
     "read_file":         lambda **kw: _run_read(kw["path"], kw.get("limit")),
@@ -434,10 +507,6 @@ def agent_loop(messages: list):
                 "role": "user",
                 "content": f"<inbox>{json.dumps(inbox, indent=2)}</inbox>",
             })
-            messages.append({
-                "role": "assistant",
-                "content": "Noted inbox messages.",
-            })
         response = client.messages.create(
             model=MODEL,
             system=SYSTEM,
@@ -456,7 +525,8 @@ def agent_loop(messages: list):
                     output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
                 except Exception as e:
                     output = f"Error: {e}"
-                print(f"> {block.name}: {str(output)[:200]}")
+                print(f"> {block.name}:")
+                print(str(output)[:200])
                 results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
